@@ -6,8 +6,6 @@
 - 从 photos.db / photo_scores 中选出一张“历史上的今天”照片
 - 按 InkTime 模拟器的布局渲染到 480x800
 - 用 LXGWHeartSerifMN.ttf 把文案 / 日期 / 地点都画到图上
-- 转成四色墨水屏（黑/白/红/黄）图像，并保存为 BIN（1 字节 1 像素，行优先）
-- 同时导出 latest.h 头文件数组，给 ESP32 直接 include
 """
 
 from __future__ import annotations
@@ -40,15 +38,54 @@ FONT_PATH = Path(str(getattr(cfg, "FONT_PATH", "") or "")).expanduser()
 if str(FONT_PATH) and not FONT_PATH.is_absolute():
     FONT_PATH = (ROOT_DIR / FONT_PATH).resolve()
 
+
+def find_system_chinese_font() -> Optional[Path]:
+    """尝试在系统字体目录中寻找常见的中文字体（Windows / macOS / Linux）。
+    返回找到的字体路径或 None。
+    """
+    candidates = []
+    # 优先使用 Windows 的楷体（SimKai）
+    candidates += [
+        r"C:\Windows\Fonts\simkai.ttf",  # 楷体
+        r"C:\Windows\Fonts\kaiu.ttf",
+        r"C:\Windows\Fonts\KAIU.TTF",
+    ]
+    # Windows 常见字体
+    candidates += [
+        r"C:\Windows\Fonts\msyh.ttc",  # 微软雅黑
+        r"C:\Windows\Fonts\msyh.ttf",
+        r"C:\Windows\Fonts\simhei.ttf",  # 黑体
+        r"C:\Windows\Fonts\simsun.ttc",  # 宋体集合
+        r"C:\Windows\Fonts\simsun.ttf",
+    ]
+    # macOS / 常见 Noto
+    candidates += [
+        "/Library/Fonts/STHeiti Medium.ttc",
+        "/System/Library/Fonts/STHeiti Medium.ttc",
+        "/Library/Fonts/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+    ]
+
+    for p in candidates:
+        try:
+            pp = Path(p)
+            if pp.exists():
+                return pp
+        except Exception:
+            continue
+    return None
+
 MEMORY_THRESHOLD = float(getattr(cfg, "MEMORY_THRESHOLD", 70.0) or 70.0)
 DAILY_PHOTO_QUANTITY = int(getattr(cfg, "DAILY_PHOTO_QUANTITY", 5) or 5)
 
-# 墨水屏尺寸
-CANVAS_WIDTH = 480
-CANVAS_HEIGHT = 800
+# 画布尺寸（按照片方向选择）
+# 横屏画布（宽 x 高）
+LANDSCAPE_CANVAS = (2048, 1536)
+# 竖屏画布（宽 x 高）
+PORTRAIT_CANVAS = (1536, 2048)
 
-# 底部文字区域高度
-TEXT_AREA_HEIGHT = 100
+# 底部文字区域高度（像素）
+TEXT_AREA_HEIGHT = 180
 
 
 # ========== DB 与 EXIF 处理 ==========
@@ -303,32 +340,6 @@ def choose_photos_for_today(items: List[Dict[str, Any]], today: dt.date, count: 
     return chosen_list, info
 # ========== 绘制 + 抖动 ==========
 
-# 四色墨水屏调色板（RGB）
-PALETTE = [
-    (0, 0, 0),         # 0 = 黑
-    (255, 255, 255),   # 1 = 白
-    (200, 0, 0),       # 2 = 红
-    (220, 180, 0),     # 3 = 黄
-]
-
-
-def nearest_palette_color(r: float, g: float, b: float) -> Tuple[int, int, int, int]:
-    """
-    返回 (idx, pr, pg, pb)，idx 为 PALETTE 中最近颜色的索引。
-    """
-    best_idx = 0
-    best_dist = float("inf")
-    for i, (pr, pg, pb) in enumerate(PALETTE):
-        dr = r - pr
-        dg = g - pg
-        db = b - pb
-        dist = dr * dr + dg * dg + db * db
-        if dist < best_dist:
-            best_dist = dist
-            best_idx = i
-    pr, pg, pb = PALETTE[best_idx]
-    return best_idx, pr, pg, pb
-
 
 def wrap_text_chinese(draw: ImageDraw.ImageDraw,
                       text: str,
@@ -399,10 +410,7 @@ def render_image(item: Dict[str, Any]) -> Image.Image:
     - 上方图片：占 [0, CANVAS_HEIGHT - TEXT_AREA_HEIGHT)
     - 底部 TEXT_AREA_HEIGHT 像素为文字区：第一行 side 文案（最多两行），第二行日期 + 地点
     """
-    canvas = Image.new("RGB", (CANVAS_WIDTH, CANVAS_HEIGHT), (255, 255, 255))
-    draw = ImageDraw.Draw(canvas)
-
-    # ---------- 加载原图并按 EXIF 方向纠正 ----------
+    # 根据原图方向选择画布尺寸：横屏使用 LANDSCAPE_CANVAS，竖屏使用 PORTRAIT_CANVAS
     img_path = Path(item["path"])
     if not img_path.exists():
         raise RuntimeError(f"图片不存在: {img_path}")
@@ -410,12 +418,21 @@ def render_image(item: Dict[str, Any]) -> Image.Image:
     img = ImageOps.exif_transpose(img).convert("RGB")
 
     img_w, img_h = img.size
+    # 横屏或方形视为横屏
+    if img_w >= img_h:
+        canvas_w, canvas_h = LANDSCAPE_CANVAS
+    else:
+        canvas_w, canvas_h = PORTRAIT_CANVAS
+
+    canvas = Image.new("RGB", (canvas_w, canvas_h), (255, 255, 255))
+    draw = ImageDraw.Draw(canvas)
+
     if img_w == 0 or img_h == 0:
         raise RuntimeError(f"图片尺寸非法: {img.size}")
 
     # ---------- 照片区域 ----------
-    img_area_w = CANVAS_WIDTH
-    img_area_h = CANVAS_HEIGHT - TEXT_AREA_HEIGHT  # 底部留给文字
+    img_area_w = canvas_w
+    img_area_h = canvas_h - TEXT_AREA_HEIGHT  # 底部留给文字
 
     # “铺满裁剪”：缩放到至少覆盖区域，再从中间裁一块
     scale = max(img_area_w / img_w, img_area_h / img_h)
@@ -434,16 +451,37 @@ def render_image(item: Dict[str, Any]) -> Image.Image:
     canvas.paste(img_cropped, (0, 0))
 
     # ---------- 底部文字区域 ----------
-    padding_x = 24
-    text_area_top = CANVAS_HEIGHT - TEXT_AREA_HEIGHT + 10
-    text_width = CANVAS_WIDTH - 2 * padding_x
+    padding_x = 48
+    text_area_top = canvas_h - TEXT_AREA_HEIGHT + 16
+    text_width = canvas_w - 2 * padding_x
 
+    font_big = None
+    font_small = None
+
+    # 如果 config 中指定了有效的字体文件，则优先使用
+    fp = str(FONT_PATH).strip()
     try:
-        font_big = ImageFont.truetype(str(FONT_PATH), 22)  # 文案
-        font_small = ImageFont.truetype(str(FONT_PATH), 20)  # 日期/地点
+        if fp and Path(fp).is_file():
+            font_big = ImageFont.truetype(fp, 48)
+            font_small = ImageFont.truetype(fp, 36)
     except Exception:
-        font_big = ImageFont.load_default()
-        font_small = ImageFont.load_default()
+        font_big = None
+        font_small = None
+
+    # 未指定或加载失败时，尝试系统中文字体（优先 simkai）
+    if font_big is None or font_small is None:
+        sys_font = find_system_chinese_font()
+        if sys_font:
+            try:
+                font_big = ImageFont.truetype(str(sys_font), 48)
+                font_small = ImageFont.truetype(str(sys_font), 36)
+                print(f"[INFO] 使用系统中文字体: {sys_font}")
+            except Exception:
+                font_big = ImageFont.load_default()
+                font_small = ImageFont.load_default()
+        else:
+            font_big = ImageFont.load_default()
+            font_small = ImageFont.load_default()
 
     side_text = item.get("side") or ""
 
@@ -451,15 +489,16 @@ def render_image(item: Dict[str, Any]) -> Image.Image:
     y = text_area_top
     if side_text:
         lines = wrap_text_chinese(draw, side_text, font_big, text_width, max_lines=2)
+        line_height = int(font_big.size * 1.15)
         for line in lines:
             draw.text((padding_x, y), line, font=font_big, fill=(0, 0, 0))
-            y += 24  # 行高略大于字号
+            y += line_height
 
-    # 日期 + 地点：固定在底部区域内的第二行
+    # 日期 + 地点：固定在底部区域内靠近底边
     date_display = format_date_display(item["date"])
     loc_display = format_location(item.get("lat"), item.get("lon"), item.get("city") or "")
 
-    second_line_y = text_area_top + 54
+    second_line_y = canvas_h - int(font_small.size * 1.2) - 12
     draw.text((padding_x, second_line_y), date_display, font=font_small, fill=(0, 0, 0))
 
     loc_w = draw.textlength(loc_display, font=font_small)
@@ -470,115 +509,7 @@ def render_image(item: Dict[str, Any]) -> Image.Image:
 
     return canvas
 
-def apply_four_color_dither(img: Image.Image) -> Image.Image:
-    """
-    对图像做 Floyd–Steinberg 抖动，量化到四种颜色（黑/白/红/黄）。
-    """
-    img = img.convert("RGB")
-    w, h = img.size
-    pixels = img.load()
-
-    err_r = [0.0] * w
-    err_g = [0.0] * w
-    err_b = [0.0] * w
-    next_err_r = [0.0] * w
-    next_err_g = [0.0] * w
-    next_err_b = [0.0] * w
-
-    for y in range(h):
-        for x in range(w):
-            r, g, b = pixels[x, y]
-            r = max(0.0, min(255.0, r + err_r[x]))
-            g = max(0.0, min(255.0, g + err_g[x]))
-            b = max(0.0, min(255.0, b + err_b[x]))
-
-            idx, pr, pg, pb = nearest_palette_color(r, g, b)
-
-            # 写回量化后的颜色
-            pixels[x, y] = (pr, pg, pb)
-
-            # 误差
-            er = r - pr
-            eg = g - pg
-            eb = b - pb
-
-            # Floyd–Steinberg:
-            #        *   7/16
-            #   3/16 5/16 1/16
-            if x + 1 < w:
-                err_r[x + 1] += er * (7.0 / 16.0)
-                err_g[x + 1] += eg * (7.0 / 16.0)
-                err_b[x + 1] += eb * (7.0 / 16.0)
-            if y + 1 < h:
-                if x > 0:
-                    next_err_r[x - 1] += er * (3.0 / 16.0)
-                    next_err_g[x - 1] += eg * (3.0 / 16.0)
-                    next_err_b[x - 1] += eb * (3.0 / 16.0)
-                next_err_r[x] += er * (5.0 / 16.0)
-                next_err_g[x] += eg * (5.0 / 16.0)
-                next_err_b[x] += eb * (5.0 / 16.0)
-                if x + 1 < w:
-                    next_err_r[x + 1] += er * (1.0 / 16.0)
-                    next_err_g[x + 1] += eg * (1.0 / 16.0)
-                    next_err_b[x + 1] += eb * (1.0 / 16.0)
-
-        if y + 1 < h:
-            # 把 next_err_* 移到当前行，并清零 next_err_*
-            for i in range(w):
-                err_r[i] = next_err_r[i]
-                err_g[i] = next_err_g[i]
-                err_b[i] = next_err_b[i]
-                next_err_r[i] = 0.0
-                next_err_g[i] = 0.0
-                next_err_b[i] = 0.0
-
-    return img
-
-
-def image_to_palette_bin(img: Image.Image) -> bytes:
-    """
-    把已经量化到 PALETTE 的图像转换成 BIN：
-    - 行优先，从上到下，从左到右
-    - 每像素 1 字节：0=黑,1=白,2=红,3=黄
-    """
-    img = img.convert("RGB")
-    if img.size != (CANVAS_WIDTH, CANVAS_HEIGHT):
-        raise RuntimeError(f"图像尺寸错误：{img.size}，应为 {(CANVAS_WIDTH, CANVAS_HEIGHT)}")
-
-    data = bytearray(CANVAS_WIDTH * CANVAS_HEIGHT)
-    idx_map = {c: i for i, c in enumerate(PALETTE)}  # (r,g,b) -> index
-
-    for y in range(CANVAS_HEIGHT):
-        for x in range(CANVAS_WIDTH):
-            r, g, b = img.getpixel((x, y))
-            key = (int(r), int(g), int(b))
-            idx = idx_map.get(key)
-            if idx is None:
-                idx, _, _, _ = nearest_palette_color(r, g, b)
-            data[y * CANVAS_WIDTH + x] = idx
-
-    return bytes(data)
-
-
-def write_h_array(bin_path: Path, h_path: Path, array_name: str = "daily_bin"):
-    """
-    把 BIN 转成 C 数组头文件 latest.h：
-    const unsigned int daily_bin_size = ...;
-    const uint8_t daily_bin[] = { 0x00, 0x01, ... };
-    """
-    data = bin_path.read_bytes()
-    with open(h_path, "w", encoding="utf-8") as f:
-        f.write("// Auto-generated from render_daily_photo.py\n")
-        f.write(f"// Size = {len(data)} bytes (480x800, 1 byte/pixel)\n\n")
-        f.write(f"const unsigned int {array_name}_size = {len(data)};\n")
-        f.write(f"const uint8_t {array_name}[] = {{\n    ")
-
-        for i, b in enumerate(data):
-            f.write(f"0x{b:02X}, ")
-            if (i + 1) % 16 == 0:
-                f.write("\n    ")
-
-        f.write("\n};\n")
+ 
 
 
 # ========== 主流程 ==========
@@ -612,44 +543,16 @@ def main():
         print("[DEBUG] 经纬度:", chosen.get("lat"), chosen.get("lon"))
         print("[DEBUG] 文案:", chosen.get("side", ""))
 
-        # 渲染成完整成品图（照片 + 文案 + 日期 + 地点）
+        # 渲染成完整成品图（照片 + 文案 + 日期 + 地点）并保存预览 PNG
         img = render_image(chosen)
-
-        # 抖动成四色墨水屏风格
-        img_dithered = apply_four_color_dither(img)
-
-        # 保存预览 PNG（已经是抖动后的效果），按索引区分
         preview_path = BIN_OUTPUT_DIR / f"preview_{idx}.png"
-        img_dithered.save(preview_path)
+        img.save(preview_path)
         print(f"[OK] 已保存预览 PNG: {preview_path}")
 
-        # 转 BIN：photo_0.bin, photo_1.bin, ...
-        bin_data = image_to_palette_bin(img_dithered)
-        bin_path = BIN_OUTPUT_DIR / f"photo_{idx}.bin"
-        with open(bin_path, "wb") as f:
-            f.write(bin_data)
-        print(f"[OK] 已生成 BIN: {bin_path} （大小 {len(bin_data)} 字节）")
-
-        # 头文件数组：photo_0.h, photo_1.h，数组名区分开
-        h_path = BIN_OUTPUT_DIR / f"photo_{idx}.h"
-        array_name = f"daily_bin_{idx}"
-        write_h_array(bin_path, h_path, array_name=array_name)
-        print(f"[OK] 已生成头文件数组: {h_path}")
-
-    # 为兼容旧流程，再额外生成 latest.* 指向第 0 张
-    first_bin = BIN_OUTPUT_DIR / "photo_0.bin"
-    first_h = BIN_OUTPUT_DIR / "photo_0.h"
+    # 为兼容旧流程，再额外生成 latest 预览指向第 0 张 preview
     first_preview = BIN_OUTPUT_DIR / "preview_0.png"
-    latest_bin = BIN_OUTPUT_DIR / "latest.bin"
-    latest_h = BIN_OUTPUT_DIR / "latest.h"
     latest_preview = BIN_OUTPUT_DIR / "preview.png"
 
-    if first_bin.exists():
-        shutil.copyfile(first_bin, latest_bin)
-        print(f"[OK] 已更新 latest.bin -> {first_bin.name}")
-    if first_h.exists():
-        shutil.copyfile(first_h, latest_h)
-        print(f"[OK] 已更新 latest.h -> {first_h.name}")
     if first_preview.exists():
         shutil.copyfile(first_preview, latest_preview)
         print(f"[OK] 已更新 preview.png -> {first_preview.name}")

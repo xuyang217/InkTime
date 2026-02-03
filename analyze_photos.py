@@ -153,7 +153,7 @@ TIMEOUT = float(getattr(cfg, "TIMEOUT", 600) or 600)
 # 发送给 VLM 之前，先把图片长边缩放到该值（像素）。
 # 0 表示不缩放。
 # 本地推理可保持较高值；云端推理建议降低（减少 token/成本）。
-VLM_MAX_LONG_EDGE = int(getattr(cfg, "VLM_MAX_LONG_EDGE", 2560) or 2560)
+VLM_MAX_LONG_EDGE = int(getattr(cfg, "VLM_MAX_LONG_EDGE", 1024) or 1024)
 
 # 中文城市数据库位置
 WORLD_CITIES_CSV = Path(str(getattr(cfg, "WORLD_CITIES_CSV", "data/world_cities_zh.csv") or "data/world_cities_zh.csv")).expanduser()
@@ -162,8 +162,8 @@ if not WORLD_CITIES_CSV.is_absolute():
 
 CITY_GRID_DEG = float(getattr(cfg, "CITY_GRID_DEG", 1.0) or 1.0)
 CITY_MAX_DISTANCE_KM = float(getattr(cfg, "CITY_MAX_DISTANCE_KM", 80.0) or 80.0)
-HOME_LAT = float(getattr(cfg, "HOME_LAT", 22.543096) or 22.543096)
-HOME_LON = float(getattr(cfg, "HOME_LON", 114.057865) or 114.057865)
+HOME_LAT = float(getattr(cfg, "HOME_LAT", 30.66667) or 30.66667)
+HOME_LON = float(getattr(cfg, "HOME_LON", 104.06667) or 104.06667)
 HOME_RADIUS_KM = float(getattr(cfg, "HOME_RADIUS_KM", 60.0) or 60.0)
 # ==================================================
 
@@ -714,14 +714,12 @@ def call_vlm(image_path: Path) -> dict:
         "- 人物与关系：画面中含有面积较大的人脸，有人物互动，或属于合影 → 大幅提高评分；\n"
         "- 事件性：生日/聚会/仪式/舞台/明显事件 → 少许提高评分；\n"
         "- 稀缺性与不可复现：明显“这一刻很难再来一次” → 大幅提高评分；\n"
-        "- 情绪强度：笑、哭、惊喜、拥抱、互动、氛围强 → 少许提高评分；\n"
+        "- 情绪强度：笑、哭、惊喜、拥抱、互动、氛围强 → 大幅提高评分；\n"
         "- 信息密度：画面能讲清楚发生了什么 → 微微提高评分；\n"
         "- 优美风景：画面中含有壮丽的自然风光，或精美、有秩序感的构图 → 少许提高评分；\n"
         "- 旅行意义：异地、地标、旅途情景 → 少许提高评分。\n\n"
         "- 画质：画面不清晰、模糊、有残影、虚焦 → 微微降低评分。\n\n"
 
-        "【重点照片的处理】\n"
-        "如果画面中含有：孩子/猫咪/宠物题材，这些主题更容易产生高回忆价值，请直接以75分为中心，并大幅提高评分”。\n"
 
         "【明显低价值图片的处理】\n"
         "对以下低价值图片，必须将 memory_score 压低到 0~25（最多不超过 39）。\n"
