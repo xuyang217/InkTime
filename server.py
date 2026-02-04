@@ -12,6 +12,7 @@ import html
 import config as cfg
 from io import BytesIO
 import render_daily_photo as rdp
+import threading
 
 ROOT_DIR = Path(__file__).resolve().parent
 
@@ -50,6 +51,13 @@ REVIEW_PAGE_SIZE = 100
 # /review 日期筛选的可用 MM-DD 列表缓存（避免每次都扫全库）
 _MD_CACHE: dict[str, object] = {"md_list": [], "built_at": 0.0}
 _MD_CACHE_TTL_SEC = 300.0  # 5 分钟
+
+# 用于浏览器刷新轮换今日多张候选图
+_CYCLE_LOCK = threading.Lock()
+_CYCLE_PHOTOS: list[dict] = []
+_CYCLE_IDX = 0
+_CYCLE_BUILT_AT = 0.0
+_CYCLE_TTL_SEC = 300.0
 
 def _load_all_md_list() -> list[str]:
     """从全库提取所有存在的 MM-DD（去重、排序）。用于前端“随机一天”。"""
@@ -1384,9 +1392,9 @@ def build_simulator_html(sim_rows, selected_img: str = ""):
 <body>
   <div class="container">
     <a class="back" href="/review">← 返回 Review</a>
-    <h1>墨水屏渲染效果预览</h1>
+    <h1>预览</h1>
     <div class="subtitle">
-      屏幕尺寸：480 x 800&nbsp;&nbsp;
+      屏幕预览（按原始比例显示）&nbsp;&nbsp;
       <span style="display:inline-flex; gap:6px; vertical-align:middle;">
         <span style="width:10px;height:10px;box-sizing:border-box;border-radius:50%;background:#000;border:1px solid rgba(255,255,255,0.70);"></span>
         <span style="width:10px;height:10px;box-sizing:border-box;border-radius:50%;background:#fff;border:1px solid rgba(255,255,255,0.45);"></span>
@@ -1731,24 +1739,36 @@ def build_simulator_html(sim_rows, selected_img: str = ""):
 
     function drawPreview(photo) {{
       if (!photo) {{
-        statusLine.textContent = '未指定照片。请从 /review 点击某张照片进入模拟器。';
+        statusLine.textContent = '未指定照片。请从 /review 点击某张照片进入预览。';
         return;
       }}
 
-      statusLine.textContent = ''; // 正常情况不显示废话
+      statusLine.textContent = ''; // 正常情况不显示信息
 
-      canvas.width = 480;
-      canvas.height = 800;
+      // 固定画布显示区域（与 UI 保持一致）
+      const CANVAS_W = 480;
+      const CANVAS_H = 800;
+      canvas.width = CANVAS_W;
+      canvas.height = CANVAS_H;
 
       ctx.fillStyle = '#FFFFFF';
-      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
 
       const img = new Image();
       img.onload = function() {{
-          canvas.width = 480;
-          canvas.height = 800;
-          ctx.clearRect(0, 0, canvas.width, canvas.height);
-          ctx.drawImage(img, 0, 0, 480, 800);
+          // 按原始比例缩放，使图片完整显示并居中（不裁切）
+          const iw = img.naturalWidth || img.width;
+          const ih = img.naturalHeight || img.height;
+          const scale = Math.min(CANVAS_W / iw, CANVAS_H / ih);
+          const dw = Math.round(iw * scale);
+          const dh = Math.round(ih * scale);
+          const dx = Math.round((CANVAS_W - dw) / 2);
+          const dy = Math.round((CANVAS_H - dh) / 2);
+
+          ctx.clearRect(0, 0, CANVAS_W, CANVAS_H);
+          ctx.fillStyle = '#FFFFFF';
+          ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
+          ctx.drawImage(img, dx, dy, dw, dh);
         }};
       img.onerror = function() {{
         statusLine.textContent = '图片加载失败：' + photo.path;
@@ -1977,39 +1997,61 @@ def sim_render():
 
     try:
         img = rdp.render_image(meta)
-        img_dithered = rdp.apply_four_color_dither(img)
-
         bio = BytesIO()
-        img_dithered.save(bio, format="PNG")
+        # 直接返回渲染结果，不做设备特定抖动
+        img.save(bio, format="PNG")
         bio.seek(0)
         return send_file(bio, mimetype="image/png", as_attachment=False)
     except Exception:
         abort(500)
 
-@app.get("/static/inktime/<key>/photo_<int:idx>.bin")
-def esp_photo(key: str, idx: int):
-    if key != DOWNLOAD_KEY:
-        abort(404)
-    if idx < 0 or idx >= DAILY_PHOTO_QUANTITY:
-        abort(404)
-    p = BIN_OUTPUT_DIR / f"photo_{idx}.bin"
-    return _send_static_file(p)
+
+def _ensure_cycle_photos():
+    """确保 _CYCLE_PHOTOS 填充为今日的候选图片（基于 rdp.choose_photos_for_today）。"""
+    import time
+    global _CYCLE_PHOTOS, _CYCLE_IDX, _CYCLE_BUILT_AT
+    now = time.time()
+    with _CYCLE_LOCK:
+        if _CYCLE_PHOTOS and (now - _CYCLE_BUILT_AT) < _CYCLE_TTL_SEC:
+            return
+        try:
+            items = rdp.load_sim_rows()
+            photos, info = rdp.choose_photos_for_today(items, rdp.TODAY, count=DAILY_PHOTO_QUANTITY)
+            # photos 是一组 item dict，直接保存
+            _CYCLE_PHOTOS = photos
+            _CYCLE_IDX = 0
+            _CYCLE_BUILT_AT = now
+            print(f"[server] cycle_photos built: {len(_CYCLE_PHOTOS)} items")
+        except Exception:
+            _CYCLE_PHOTOS = []
+            _CYCLE_IDX = 0
+            _CYCLE_BUILT_AT = now
 
 
-@app.get("/static/inktime/<key>/latest.bin")
-def esp_latest(key: str):
-    if key != DOWNLOAD_KEY:
-        abort(404)
-    p = BIN_OUTPUT_DIR / "latest.bin"
-    return _send_static_file(p)
+@app.get('/today_image')
+def today_image():
+    """返回今日候选图之一；每次访问按循环顺序切换，方便浏览器刷新切换图片。"""
+    _require_webui_enabled()
+    _ensure_cycle_photos()
+    global _CYCLE_IDX
+    with _CYCLE_LOCK:
+        if not _CYCLE_PHOTOS:
+            abort(404)
+        idx = _CYCLE_IDX
+        _CYCLE_IDX = (_CYCLE_IDX + 1) % len(_CYCLE_PHOTOS)
+        photo = _CYCLE_PHOTOS[idx]
 
+    # photo 格式与 rdp.render_image 接受的 item 一致
+    try:
+        img = rdp.render_image(photo)
+        bio = BytesIO()
+        img.save(bio, format='PNG')
+        bio.seek(0)
+        return send_file(bio, mimetype='image/png', as_attachment=False)
+    except Exception:
+        abort(500)
 
-@app.get("/static/inktime/<key>/preview.png")
-def esp_preview(key: str):
-    if key != DOWNLOAD_KEY:
-        abort(404)
-    p = BIN_OUTPUT_DIR / "preview.png"
-    return _send_static_file(p)
+# ESP32 专用下载接口已移除 — 现在直接通过网页访问渲染结果
 
 
 @app.get("/files/")
