@@ -4,7 +4,6 @@
 """
 每日相册渲染脚本：
 - 从 photos.db / photo_scores 中选出一张“历史上的今天”照片
-- 按 InkTime 模拟器的布局渲染到 480x800
 - 用 LXGWHeartSerifMN.ttf 把文案 / 日期 / 地点都画到图上
 """
 
@@ -338,6 +337,144 @@ def choose_photos_for_today(items: List[Dict[str, Any]], today: dt.date, count: 
         "fallback_global_max": True,
     }
     return chosen_list, info
+
+
+def choose_photos_by_orientation(items: List[Dict[str, Any]], today: dt.date,
+                                 landscape_count: int = 5, portrait_count: int = 5) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    """
+    目标：返回指定数量的横屏与竖屏照片（分别为 landscape_count / portrait_count）。
+    策略：与 choose_photos_for_today 相同的按月日回溯查找 memory > MEMORY_THRESHOLD 的候选池，
+    在候选池中根据实际图片尺寸区分横/竖并抽取所需数量；不足时从全局最高 memory 中补齐。
+    返回 (chosen_list, info)，其中 chosen_list 长度为 landscape_count+portrait_count（不重复路径）。
+    """
+    if not items:
+        raise RuntimeError("没有任何可用照片")
+
+    # 按 md 分组
+    by_md: Dict[str, List[Dict[str, Any]]] = {}
+    for it in items:
+        md = it["md"]
+        by_md.setdefault(md, []).append(it)
+
+    # 每组内按 memory 从高到低排序
+    for arr in by_md.values():
+        arr.sort(key=lambda x: x.get("memory", -1.0), reverse=True)
+
+    target_md = f"{today.month:02d}-{today.day:02d}"
+    target_doy = md_to_day_of_year(target_md)
+    if target_doy is None:
+        raise RuntimeError(f"无法解析今天的月日: {target_md}")
+
+    import random
+
+    def is_landscape(path: str) -> Optional[bool]:
+        try:
+            p = Path(path)
+            if not p.exists():
+                return None
+            im = Image.open(p)
+            im = ImageOps.exif_transpose(im)
+            w, h = im.size
+            return w >= h
+        except Exception:
+            return None
+
+    pool: List[Dict[str, Any]] = []
+    seen_paths = set()
+
+    used_md = ""
+    for offset in range(0, 365):
+        doy = target_doy - offset
+        if doy <= 0:
+            doy += 365
+        md = day_of_year_to_md(doy)
+
+        arr = by_md.get(md, [])
+        if not arr:
+            continue
+        candidates = [p for p in arr if p.get("memory", -1.0) > MEMORY_THRESHOLD]
+        if not candidates:
+            continue
+
+        # 将候选加入 pool（去重）
+        for p in candidates:
+            if p["path"] in seen_paths:
+                continue
+            pool.append(p)
+            seen_paths.add(p["path"])
+
+        # 统计当前 pool 中横/竖数量
+        lands: List[Dict[str, Any]] = []
+        ports: List[Dict[str, Any]] = []
+        for p in pool:
+            ori = is_landscape(p["path"])
+            if ori is True:
+                lands.append(p)
+            elif ori is False:
+                ports.append(p)
+            # None（无法判断）则忽略
+
+        if len(lands) >= landscape_count and len(ports) >= portrait_count:
+            used_md = md
+            break
+
+    chosen: List[Dict[str, Any]] = []
+    # 从 pool 中随机选取满足横竖要求
+    lands = [p for p in pool if is_landscape(p["path"]) is True]
+    ports = [p for p in pool if is_landscape(p["path"]) is False]
+
+    if len(lands) >= landscape_count:
+        chosen.extend(random.sample(lands, landscape_count))
+    else:
+        chosen.extend(lands)
+
+    if len(ports) >= portrait_count:
+        chosen.extend(random.sample(ports, portrait_count))
+    else:
+        chosen.extend(ports)
+
+    # 如果不足，则从全局按 memory 取补齐（避免重复路径）
+    if len(chosen) < (landscape_count + portrait_count):
+        sorted_all = sorted(items, key=lambda x: x.get("memory", -1.0), reverse=True)
+        for p in sorted_all:
+            if p["path"] in {c["path"] for c in chosen}:
+                continue
+            # 判断方向并补到需要的分类
+            ori = is_landscape(p["path"])
+            if ori is True and sum(1 for c in chosen if is_landscape(c["path"]) is True) < landscape_count:
+                chosen.append(p)
+            elif ori is False and sum(1 for c in chosen if is_landscape(c["path"]) is False) < portrait_count:
+                chosen.append(p)
+            # 如果方向无法判断，则当作通用候选补齐任一不足类别
+            elif ori is None:
+                if sum(1 for c in chosen if is_landscape(c["path"]) is True) < landscape_count:
+                    chosen.append(p)
+                elif sum(1 for c in chosen if is_landscape(c["path"]) is False) < portrait_count:
+                    chosen.append(p)
+            if len(chosen) >= (landscape_count + portrait_count):
+                break
+
+    # 最终去重并修整顺序（先横后竖）
+    final: List[Dict[str, Any]] = []
+    seen = set()
+    for c in chosen:
+        if c["path"] in seen:
+            continue
+        final.append(c)
+        seen.add(c["path"])
+
+    # 如果仍然不足，用空列表补足（保持长度一致）
+    # info 包含一些调试字段
+    info = {
+        "target_md": target_md,
+        "used_md": used_md or (final[0]["md"] if final else ""),
+        "requested_landscape": landscape_count,
+        "requested_portrait": portrait_count,
+        "returned_count": len(final),
+        "threshold": MEMORY_THRESHOLD,
+    }
+
+    return final, info
 # ========== 绘制 + 抖动 ==========
 
 
@@ -519,14 +656,15 @@ def main():
     if not items:
         raise SystemExit("没有可用照片（exif_json 为空或解析失败）。")
 
-    photos, info = choose_photos_for_today(items, TODAY, count=DAILY_PHOTO_QUANTITY)
+    # 选 10 张：5 横屏，5 竖屏
+    photos, info = choose_photos_by_orientation(items, TODAY, landscape_count=5, portrait_count=5)
 
-    print("[INFO] 目标月日:", info["target_md"])
-    print("[INFO] 实际使用月日:", info["used_md"])
-    print("[INFO] 回溯天数(day_offset):", info["day_offset"])
-    print("[INFO] 候选数(>阈值):", info["candidate_count"])
-    print("[INFO] 当日总数:", info["total_count_md"])
-    print("[INFO] 使用兜底全局最大:", info["fallback_global_max"])
+    print("[INFO] 目标月日:", info.get("target_md"))
+    print("[INFO] 实际使用月日:", info.get("used_md"))
+    print("[INFO] 回溯天数(day_offset):", info.get("day_offset", "N/A"))
+    print("[INFO] 候选数(>阈值):", info.get("candidate_count", "N/A"))
+    print("[INFO] 当日总数:", info.get("total_count_md", "N/A"))
+    print("[INFO] 使用兜底全局最大:", info.get("fallback_global_max", False))
 
     if not photos:
         raise SystemExit("选片结果为空。")
@@ -549,13 +687,7 @@ def main():
         img.save(preview_path)
         print(f"[OK] 已保存预览 PNG: {preview_path}")
 
-    # 为兼容旧流程，再额外生成 latest 预览指向第 0 张 preview
-    first_preview = BIN_OUTPUT_DIR / "preview_0.png"
-    latest_preview = BIN_OUTPUT_DIR / "preview.png"
-
-    if first_preview.exists():
-        shutil.copyfile(first_preview, latest_preview)
-        print(f"[OK] 已更新 preview.png -> {first_preview.name}")
+    # 不再生成 preview.png（兼容旧流程的单一预览已取消）
 
 
 if __name__ == "__main__":

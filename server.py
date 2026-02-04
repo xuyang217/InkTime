@@ -1786,20 +1786,24 @@ def build_simulator_html(sim_rows, selected_img: str = ""):
       img.src = '/sim_render?img=' + encodeURIComponent(photo.path);
     }}
 
-    function pickPhotoFromDate(date) {{
+    function pickPhotoFromDate(date, excludePath) {{
       const arr = byDate.get(date) || [];
       if (!arr.length) return null;
 
       const THRESHOLD = {float(getattr(cfg, "MEMORY_THRESHOLD", 70.0) or 70.0)};
-      const candidates = arr.filter(p => p.memory != null && p.memory > THRESHOLD);
+      // 先过滤掉要排除的路径（如果有）
+      const pool = excludePath ? arr.filter(p => p.path !== excludePath) : arr.slice();
+      if (!pool.length) return null;
+
+      const candidates = pool.filter(p => p.memory != null && p.memory > THRESHOLD);
       if (candidates.length > 0) {{
         const idx = Math.floor(Math.random() * candidates.length);
         return {{ photo: candidates[idx], dateUsed: date }};
       }}
 
-      // 兜底：当天随便挑
-      const idx = Math.floor(Math.random() * arr.length);
-      return {{ photo: arr[idx], dateUsed: date, fallbackNoThreshold: true }};
+      // 兜底：当天随便挑（已排除 excludePath）
+      const idx = Math.floor(Math.random() * pool.length);
+      return {{ photo: pool[idx], dateUsed: date, fallbackNoThreshold: true }};
     }}
 
     function getPreviousDateStr(dateStr) {{
@@ -1818,13 +1822,13 @@ def build_simulator_html(sim_rows, selected_img: str = ""):
       return yy + '-' + mm + '-' + dd;
     }}
 
-    function pickPhotoWithLookback(baseDate) {{
+    function pickPhotoWithLookback(baseDate, excludePath) {{
       if (!baseDate) return null;
       let date = baseDate;
       const MAX_LOOKBACK = 30;
 
       for (let i = 0; i < MAX_LOOKBACK; i++) {{
-        const picked = pickPhotoFromDate(date);
+        const picked = pickPhotoFromDate(date, excludePath);
         if (picked && picked.photo) return picked;
         const prev = getPreviousDateStr(date);
         if (!prev) break;
@@ -1849,17 +1853,17 @@ def build_simulator_html(sim_rows, selected_img: str = ""):
         return;
       }}
 
-      const pick = pickPhotoWithLookback(currentDate);
+      const pick = pickPhotoWithLookback(currentDate, currentPhoto ? currentPhoto.path : null);
       if (!pick || !pick.photo) {{
         statusLine.textContent = '该日期及向前 30 天内没有可用照片。';
         return;
       }}
 
-      // 如果刚好又抽到自己，尝试再抽几次
+      // 如果刚好又抽到自己（理论上已尽量排除），再允许尝试几次（继续排除当前路径）
       let tries = 0;
       let chosen = pick;
       while (tries < 6 && chosen && chosen.photo && currentPhoto && chosen.photo.path === currentPhoto.path) {{
-        const again = pickPhotoWithLookback(currentDate);
+        const again = pickPhotoWithLookback(currentDate, currentPhoto ? currentPhoto.path : null);
         if (!again || !again.photo) break;
         chosen = again;
         tries++;
@@ -2026,7 +2030,11 @@ def _ensure_cycle_photos():
             return
         try:
             items = rdp.load_sim_rows()
-            photos, info = rdp.choose_photos_for_today(items, rdp.TODAY, count=DAILY_PHOTO_QUANTITY)
+            # 优先使用按方向选片（5 横 + 5 竖），若不可用则回退到旧的按数量选片
+            try:
+              photos, info = rdp.choose_photos_by_orientation(items, rdp.TODAY, landscape_count=5, portrait_count=5)
+            except Exception:
+              photos, info = rdp.choose_photos_for_today(items, rdp.TODAY, count=DAILY_PHOTO_QUANTITY)
             # photos 是一组 item dict，直接保存
             _CYCLE_PHOTOS = photos
             _CYCLE_IDX = 0
