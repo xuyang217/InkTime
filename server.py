@@ -517,9 +517,7 @@ def build_html(rows, page: int, page_size: int, total_count: int):
       margin:0;
       padding:0;
       font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
-      background: radial-gradient(1200px 800px at 20% 0%, rgba(138,180,255,0.18), transparent 45%),
-                  radial-gradient(900px 700px at 90% 20%, rgba(156,255,214,0.14), transparent 55%),
-                  linear-gradient(180deg, #07080b 0%, #0b0c10 40%, #0b0c10 100%);
+      background: #9FB8A9; /* 豆沙绿 */
       color: var(--text);
     }}
     .container{{
@@ -1049,9 +1047,7 @@ def build_simulator_html(sim_rows, selected_img: str = ""):
     body {{
       margin:0; padding:0;
       font-family:-apple-system,BlinkMacSystemFont,system-ui,sans-serif;
-      background: radial-gradient(1200px 800px at 20% 0%, rgba(138,180,255,0.18), transparent 45%),
-                  radial-gradient(900px 700px at 90% 20%, rgba(156,255,214,0.14), transparent 55%),
-                  linear-gradient(180deg, #07080b 0%, #0b0c10 40%, #0b0c10 100%);
+      background: #9FB8A9; /* 豆沙绿 */
       color: var(--text);
     }}
     .container {{
@@ -1116,17 +1112,20 @@ def build_simulator_html(sim_rows, selected_img: str = ""):
 
     .preview-wrap {{
       display:flex;
-      flex-wrap:wrap;
-      gap: 16px;
-      align-items: flex-start;
+      flex-direction:column;
+      gap: 18px;
+      align-items: center;
     }}
     .canvas-box {{
-      background: var(--panel);
-      border: 1px solid var(--line);
-      border-radius: var(--radius);
-      padding: 10px;
-      box-shadow: var(--shadow2);
-      backdrop-filter: blur(10px);
+      width: 100%;
+      display:flex;
+      justify-content: center;
+      background: transparent;
+      border: none;
+      border-radius: 0;
+      padding: 0;
+      box-shadow: none;
+      backdrop-filter: none;
     }}
     .canvas-box h2 {{
       font-size: 13px;
@@ -1135,22 +1134,25 @@ def build_simulator_html(sim_rows, selected_img: str = ""):
     }}
     #previewCanvas {{
       display:block;
-      background:#fff;
-      border: 1px solid rgba(255,255,255,0.18);
-      border-radius: 10px;
+      background: transparent;
+      border: none;
+      border-radius: 8px;
+      width: 100%;
+      height: auto;
+      max-width: 960px;
     }}
 
     .meta-box {{
-      flex: 1;
-      min-width: 320px;
+      width: 100%;
+      max-width: 960px;
       background: var(--panel);
       border: 1px solid var(--line);
       border-radius: var(--radius);
-      padding: 12px;
+      padding: 14px;
       box-shadow: var(--shadow2);
       backdrop-filter: blur(10px);
       font-size: 16px;
-      line-height: 1.75;
+      line-height: 1.6;
     }}
     .meta-title {{
       font-size: 13px;
@@ -1409,9 +1411,9 @@ def build_simulator_html(sim_rows, selected_img: str = ""):
 
     <div class="status" id="statusLine"></div>
 
-    <div class="preview-wrap">
+      <div class="preview-wrap">
       <div class="canvas-box">
-        <canvas id="previewCanvas" width="480" height="800"></canvas>
+        <canvas id="previewCanvas" width="960" height="540"></canvas>
       </div>
 
       <div class="meta-box">
@@ -1745,29 +1747,37 @@ def build_simulator_html(sim_rows, selected_img: str = ""):
 
       statusLine.textContent = ''; // 正常情况不显示信息
 
-      // 固定画布显示区域（与 UI 保持一致）
-      const CANVAS_W = 480;
-      const CANVAS_H = 800;
-      canvas.width = CANVAS_W;
-      canvas.height = CANVAS_H;
-
+      // 固定画布显示区域（与 UI 保持一致），改为根据容器宽度自适应并支持高清渲染（devicePixelRatio）
+      const BASE_W = 960;
+      const BASE_H = 540;
+      const dpr = window.devicePixelRatio || 1;
+      const parent = canvas.parentElement || document.body;
+      const cssWidth = Math.min(parent.clientWidth, BASE_W);
+      const cssHeight = Math.round(cssWidth * BASE_H / BASE_W);
+      // 设置 CSS 尺寸用于布局，并设置实际像素用于高清渲染
+      canvas.style.width = cssWidth + 'px';
+      canvas.style.height = cssHeight + 'px';
+      canvas.width = Math.round(cssWidth * dpr);
+      canvas.height = Math.round(cssHeight * dpr);
+      // 将绘图坐标系映射到 CSS 像素单位（方便后续绘制使用原本的坐标值）
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
       ctx.fillStyle = '#FFFFFF';
-      ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
+      ctx.fillRect(0, 0, cssWidth, cssHeight);
 
       const img = new Image();
       img.onload = function() {{
-          // 按原始比例缩放，使图片完整显示并居中（不裁切）
+          // 按原始比例缩放，使图片完整显示并居中（不裁切），使用 CSS 像素尺寸
           const iw = img.naturalWidth || img.width;
           const ih = img.naturalHeight || img.height;
-          const scale = Math.min(CANVAS_W / iw, CANVAS_H / ih);
+          const scale = Math.min(cssWidth / iw, cssHeight / ih);
           const dw = Math.round(iw * scale);
           const dh = Math.round(ih * scale);
-          const dx = Math.round((CANVAS_W - dw) / 2);
-          const dy = Math.round((CANVAS_H - dh) / 2);
+          const dx = Math.round((cssWidth - dw) / 2);
+          const dy = Math.round((cssHeight - dh) / 2);
 
-          ctx.clearRect(0, 0, CANVAS_W, CANVAS_H);
+          ctx.clearRect(0, 0, cssWidth, cssHeight);
           ctx.fillStyle = '#FFFFFF';
-          ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
+          ctx.fillRect(0, 0, cssWidth, cssHeight);
           ctx.drawImage(img, dx, dy, dw, dh);
         }};
       img.onerror = function() {{
