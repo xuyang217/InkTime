@@ -193,71 +193,7 @@ def day_of_year_to_md(day: int) -> str:
     return f"{base.month:02d}-{base.day:02d}"
 
 
-def choose_photo_for_today(items: List[Dict[str, Any]], today: dt.date) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-    """
-    选片规则（按月日）：
-    - 以 today 的月日为目标，例如 12 月 2 日 -> "12-02"
-    - 在所有年份该月日的照片中，找 memory > MEMORY_THRESHOLD 的候选，随机选一张
-    - 如果该月日没有任何 > 阈值的，则往前一天（月日）继续找（12-01, 11-30, ...），最多回溯 365 天
-    - 如果整个 365 天都没有任何 > 阈值的照片，则在全局中选 memory 最大的一张作为兜底
-    """
 
-    if not items:
-        raise RuntimeError("没有任何可用照片")
-
-    # 按 md 分组
-    by_md: Dict[str, List[Dict[str, Any]]] = {}
-    for it in items:
-        md = it["md"]
-        by_md.setdefault(md, []).append(it)
-
-    # 每组内按 memory 从高到低排序
-    for arr in by_md.values():
-        arr.sort(key=lambda x: x.get("memory", -1.0), reverse=True)
-
-    target_md = f"{today.month:02d}-{today.day:02d}"
-    target_doy = md_to_day_of_year(target_md)
-    if target_doy is None:
-        raise RuntimeError(f"无法解析今天的月日: {target_md}")
-
-    import random
-
-    for offset in range(0, 365):
-        doy = target_doy - offset
-        if doy <= 0:
-            doy += 365
-        md = day_of_year_to_md(doy)
-
-        arr = by_md.get(md, [])
-        if not arr:
-            continue
-        candidates = [p for p in arr if p.get("memory", -1.0) > MEMORY_THRESHOLD]
-        if not candidates:
-            continue
-
-        chosen = random.choice(candidates)
-        info = {
-            "target_md": target_md,
-            "used_md": md,
-            "day_offset": -offset,
-            "candidate_count": len(candidates),
-            "total_count_md": len(arr),
-            "threshold": MEMORY_THRESHOLD,
-            "fallback_global_max": False,
-        }
-        return chosen, info
-
-    global_best = max(items, key=lambda x: x.get("memory", -1.0))
-    info = {
-        "target_md": target_md,
-        "used_md": global_best["md"],
-        "day_offset": None,
-        "candidate_count": 1,
-        "total_count_md": len(by_md.get(global_best["md"], [])),
-        "threshold": MEMORY_THRESHOLD,
-        "fallback_global_max": True,
-    }
-    return global_best, info
 
 def choose_photos_for_today(items: List[Dict[str, Any]], today: dt.date, count: int = 5) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     """
