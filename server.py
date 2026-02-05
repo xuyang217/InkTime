@@ -54,9 +54,8 @@ _MD_CACHE_TTL_SEC = 300.0  # 5 分钟
 
 # 用于浏览器刷新轮换今日多张候选图
 _CYCLE_LOCK = threading.Lock()
-_CYCLE_PHOTOS: list[dict] = []
-_CYCLE_IDX = 0
-_CYCLE_BUILT_AT = 0.0
+# 使用字典为每个方向维护独立的状态
+_CYCLE_STATES = {}  # {orientation: {'photos': [...], 'idx': int, 'built_at': float}}
 _CYCLE_TTL_SEC = 300.0
 
 def _load_all_md_list() -> list[str]:
@@ -139,8 +138,8 @@ def _make_image_url(path_str: str) -> str:
 # --------------------------
 
 
-def load_rows(page: int = 1, page_size: int = REVIEW_PAGE_SIZE, md: str = "", sort: str = "memory"):
-    """分页读取 review 数据。支持按 MM-DD 过滤与排序。返回 (rows, total_count)."""
+def load_rows(page: int = 1, page_size: int = REVIEW_PAGE_SIZE, md: str = "", sort: str = "memory", month: str = "", day: str = ""):
+    """分页读取 review 数据。支持按 MM-DD、月份或日期过滤与排序。返回 (rows, total_count)."""
     if not DB_PATH.exists():
         raise SystemExit(f"找不到数据库文件: {DB_PATH}")
 
@@ -158,17 +157,43 @@ def load_rows(page: int = 1, page_size: int = REVIEW_PAGE_SIZE, md: str = "", so
     # 期望格式："YYYY:MM:DD HH:MM:SS"（extract_date_from_exif 也按这个假设）
     dt_expr = "json_extract(exif_json, '$.datetime')"
     md_expr = f"(substr({dt_expr}, 6, 2) || '-' || substr({dt_expr}, 9, 2))"
+    month_expr = f"substr({dt_expr}, 6, 2)"  # 提取月份部分 (MM)
+    day_expr = f"substr({dt_expr}, 9, 2)"    # 提取日期部分 (DD)
 
-    where_sql = ""
+    where_parts = []
     params: list[object] = []
 
+    # 优先处理 MM-DD 筛选（最高优先级）
     md = (md or "").strip()
     if md and len(md) == 5 and md[2] == "-":
-        where_sql = f"WHERE {dt_expr} IS NOT NULL AND {md_expr} = ?"
+        where_parts.append(f"{dt_expr} IS NOT NULL AND {md_expr} = ?")
         params.append(md)
+    else:
+        # 如果没有 MM-DD 筛选，则处理月份和日期筛选
+        month = (month or "").strip()
+        day = (day or "").strip()
+
+        # 如果同时提供了月份和日期，则组合成 MM-DD 格式
+        if month and day and len(month) == 2 and len(day) == 2:
+            combined_md = f"{month}-{day}"
+            where_parts.append(f"{dt_expr} IS NOT NULL AND {md_expr} = ?")
+            params.append(combined_md)
+        else:
+            # 只有月份或只有日期的情况下分别处理
+            if month and len(month) == 2:
+                where_parts.append(f"{dt_expr} IS NOT NULL AND {month_expr} = ?")
+                params.append(month)
+            if day and len(day) == 2:
+                where_parts.append(f"{dt_expr} IS NOT NULL AND {day_expr} = ?")
+                params.append(day)
+
+    # 组合 WHERE 子句
+    where_sql = ""
+    if where_parts:
+        where_sql = "WHERE " + " AND ".join(where_parts)
 
     # total_count 也要跟随过滤
-    if where_sql:
+    if where_parts:
         total_count = c.execute(f"SELECT COUNT(1) FROM photo_scores {where_sql}", params).fetchone()[0]
     else:
         total_count = c.execute("SELECT COUNT(1) FROM photo_scores").fetchone()[0]
@@ -561,11 +586,15 @@ def build_html(rows, page: int, page_size: int, total_count: int):
     .controls select{{
       padding: 7px 10px;
       font-size: 13px;
-      color: var(--text);
-      background: rgba(255,255,255,0.08);
-      border: 1px solid rgba(255,255,255,0.16);
+      color: #ffffff;  /* 白色文字，确保可见性 */
+      background: rgba(0, 0, 0, 0.45);  /* 深色背景，提高对比度 */
+      border: 1px solid rgba(255,255,255,0.20);
       border-radius: 10px;
       outline: none;
+    }}
+    .controls select option{{
+      background: #1a1a1a;  /* 下拉选项的深色背景 */
+      color: #ffffff;       /* 下拉选项的白色文字 */
     }}
     .controls select:focus{{
       border-color: rgba(138,180,255,0.7);
@@ -698,10 +727,46 @@ def build_html(rows, page: int, page_size: int, total_count: int):
       color: var(--text);
     }}
 
-    @media (max-width: 560px){{
+    /* 横屏模式下的自适应 */
+    @media screen and (orientation: landscape) {{
+      .grid {{
+        grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); /* 横屏时稍微增加卡片最小宽度 */
+      }}
+      .container {{
+        max-width: 1400px; /* 横屏时稍微增加最大宽度 */
+      }}
+    }}
+
+    /* 竖屏模式下的自适应 */
+    @media screen and (orientation: portrait) {{
+      .grid {{
+        grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); /* 竖屏时减少卡片最小宽度 */
+      }}
+      .container {{
+        margin: 20px auto 50px; /* 竖屏时调整边距 */
+        padding: 0 12px;
+      }}
+      .controls {{
+        flex-direction: column; /* 竖屏时控制元素垂直排列 */
+        align-items: stretch;
+      }}
+      .controls label {{
+        justify-content: flex-start;
+      }}
+    }}
+
+    /* 小屏幕设备的适配 */
+    @media (max-width: 560px) {{
       .container{{ padding: 0 14px; }}
       .grid{{ grid-template-columns: 1fr; }}
       .controls{{ gap: 8px; }}
+
+      /* 竖屏小设备进一步优化 */
+      @media screen and (orientation: portrait) {{
+        .grid {{
+          grid-template-columns: 1fr; /* 小屏竖屏强制单列 */
+        }}
+      }}
     }}
   </style>
 </head>
@@ -795,17 +860,31 @@ def build_html(rows, page: int, page_size: int, total_count: int):
       function getParams() {{
         const url = new URL(window.location.href);
         const md = (url.searchParams.get('md') || '').trim();
+        const month = (url.searchParams.get('month') || '').trim();
+        const day = (url.searchParams.get('day') || '').trim();
         const sort = (url.searchParams.get('sort') || '').trim() || 'memory';
         const page = parseInt(url.searchParams.get('page') || '1', 10) || 1;
-        return {{ url, md, sort, page }};
+        return {{ url, md, month, day, sort, page }};
       }}
 
       function setSelectsFromUrl() {{
         const p = getParams();
         // sort
         if (sortSelect) sortSelect.value = p.sort;
-        // md -> month/day
-        if (p.md && p.md.length === 5 && p.md.indexOf('-') === 2) {{
+        // 检查是否有月份或日期参数
+        if (p.month || p.day) {{
+          if (monthSelect) monthSelect.value = p.month;
+          if (daySelect) daySelect.value = p.day;
+          if (statusLine) {{
+            let filterDesc = '当前筛选：';
+            if (p.month) filterDesc += '月份 ' + p.month;
+            if (p.day) filterDesc += (p.month ? ' & ' : '') + '日期 ' + p.day;
+            filterDesc += '（全库）';
+            statusLine.textContent = filterDesc;
+          }}
+        }}
+        // md -> month/day (保持向后兼容)
+        else if (p.md && p.md.length === 5 && p.md.indexOf('-') === 2) {{
           const parts = p.md.split('-');
           if (parts.length === 2) {{
             if (monthSelect) monthSelect.value = parts[0];
@@ -820,6 +899,7 @@ def build_html(rows, page: int, page_size: int, total_count: int):
       }}
 
       function buildReviewUrl(md, sort, page) {{
+        // 获取当前 URL 参数，包括月份和日期
         const url = new URL(window.location.href);
         url.pathname = '/review';
         if (md && md.length === 5 && md.indexOf('-') === 2) url.searchParams.set('md', md);
@@ -830,13 +910,37 @@ def build_html(rows, page: int, page_size: int, total_count: int):
         return url.toString();
       }}
 
+      function buildReviewUrlWithFilters(month, day, sort, page) {{
+        const url = new URL(window.location.href);
+        url.pathname = '/review';
+        // 设置月份和日期参数
+        if (month && month.length === 2) url.searchParams.set('month', month);
+        else url.searchParams.delete('month');
+        if (day && day.length === 2) url.searchParams.set('day', day);
+        else url.searchParams.delete('day');
+        // 删除 md 参数，避免冲突
+        url.searchParams.delete('md');
+        if (sort) url.searchParams.set('sort', sort);
+        else url.searchParams.delete('sort');
+        url.searchParams.set('page', String(page || 1));
+        return url.toString();
+      }}
+
       function goPage(p) {{
         const params = getParams();
-        navigateTo(buildReviewUrl(params.md, params.sort, p));
+
+        // 如果有月份或日期参数，使用 buildReviewUrlWithFilters
+        if (params.month || params.day) {{
+          navigateTo(buildReviewUrlWithFilters(params.month, params.day, params.sort, p));
+        }} else {{
+          // 否则使用原有的 buildReviewUrl
+          navigateTo(buildReviewUrl(params.md, params.sort, p));
+        }}
       }}
 
       function goHome() {{
         const params = getParams();
+        // 清除月份、日期和 md 参数，返回到完整列表
         navigateTo(buildReviewUrl('', params.sort || 'memory', 1));
       }}
 
@@ -871,18 +975,38 @@ def build_html(rows, page: int, page_size: int, total_count: int):
           navigateTo(buildReviewUrl('', sortBy, 1));
           return;
         }}
+
         if (mVal && dVal) {{
+          // 同时选择了月份和日期
           const md = mVal + '-' + dVal;
           navigateTo(buildReviewUrl(md, sortBy, 1));
           return;
         }}
-        // 只选了一个，不跳转，避免生成无意义的 md
+
+        if (mVal && !dVal) {{
+          // 只选择了月份
+          navigateTo(buildReviewUrlWithFilters(mVal, '', sort, 1));
+          return;
+        }}
+
+        if (!mVal && dVal) {{
+          // 只选择了日期
+          navigateTo(buildReviewUrlWithFilters('', dVal, sort, 1));
+          return;
+        }}
       }}
 
       function onSortChange() {{
         const params = getParams();
         const sortBy = (sortSelect && sortSelect.value) ? sortSelect.value : 'memory';
-        navigateTo(buildReviewUrl(params.md, sortBy, 1));
+
+        // 如果有月份或日期参数，使用 buildReviewUrlWithFilters
+        if (params.month || params.day) {{
+          navigateTo(buildReviewUrlWithFilters(params.month, params.day, sortBy, 1));
+        }} else {{
+          // 否则使用原有的 buildReviewUrl
+          navigateTo(buildReviewUrl(params.md, sortBy, 1));
+        }}
       }}
 
       // 分页按钮
@@ -1898,10 +2022,136 @@ def build_simulator_html(sim_rows, selected_img: str = ""):
 # Routes
 # --------------------------
 
+def build_index_html():
+    """构���主页HTML，显示全局照片和今日精选两个选项"""
+    html_str = """<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <title>InkTime 主页</title>
+  <style>
+    :root {
+      --bg: #0b0c10;
+      --panel: rgba(255,255,255,0.06);
+      --card: rgba(255,255,255,0.10);
+      --card2: rgba(255,255,255,0.08);
+      --text: rgba(255,255,255,0.92);
+      --muted: rgba(255,255,255,0.62);
+      --muted2: rgba(255,255,255,0.48);
+      --line: rgba(255,255,255,0.14);
+      --accent: #8ab4ff;
+      --accent2:#9cffd6;
+      --shadow: 0 18px 60px rgba(0,0,0,0.45);
+      --shadow2: 0 10px 28px rgba(0,0,0,0.35);
+      --radius: 14px;
+    }
+    body {
+      margin: 0;
+      padding: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
+      background: #9FB8A9; /* 豆沙绿 */
+      color: var(--text);
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      min-height: 100vh;
+    }
+    .container {
+      max-width: 600px;
+      margin: 0 auto;
+      padding: 0 20px;
+    }
+    .title {
+      text-align: center;
+      font-size: 28px;
+      margin: 0 0 40px;
+      letter-spacing: 0.5px;
+      color: var(--text);
+    }
+    .options-grid {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 20px;
+    }
+    .option-card {
+      background: linear-gradient(180deg, var(--card) 0%, var(--card2) 100%);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      padding: 30px;
+      text-align: center;
+      cursor: pointer;
+      transition: transform .12s ease, border-color .15s ease, box-shadow .15s ease;
+      text-decoration: none;
+      display: block;
+      color: inherit;
+    }
+    .option-card:hover {
+      transform: translateY(-4px);
+      border-color: var(--accent);
+      box-shadow: var(--shadow);
+    }
+    .option-title {
+      font-size: 20px;
+      margin: 0 0 12px;
+      font-weight: 600;
+    }
+    .option-desc {
+      font-size: 14px;
+      color: var(--muted);
+      margin: 0;
+      line-height: 1.5;
+    }
+
+    /* 横屏模式下的自适应 */
+    @media screen and (orientation: landscape) {
+      .options-grid {
+        grid-template-columns: 1fr 1fr; /* 横屏时显示两列 */
+        gap: 30px;
+      }
+      .option-card {
+        padding: 35px 25px; /* 横屏时调整内边距 */
+      }
+    }
+
+    /* 竖屏模式下的自适应 */
+    @media screen and (orientation: portrait) {
+      .title {
+        font-size: 26px; /* 竖屏时稍微减小标题大小 */
+        margin: 0 0 30px;
+      }
+      .options-grid {
+        gap: 16px; /* 竖屏时减小间距 */
+      }
+      .option-card {
+        padding: 25px 20px; /* 竖屏时调整内边距 */
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1 class="title">I 照片管理</h1>
+    <div class="options-grid">
+      <a href="/review" class="option-card">
+        <h2 class="option-title">全局照片</h2>
+        <p class="option-desc">浏览和管理所有照片，支持按日期、评分等条件筛选</p>
+      </a>
+      <a href="/today-image" class="option-card">
+        <h2 class="option-title">今日精选</h2>
+        <p class="option-desc">查看今日推荐的照片</p>
+      </a>
+    </div>
+  </div>
+</body>
+</html>"""
+    return html_str
+
+
 @app.get("/")
 def index():
     if ENABLE_REVIEW_WEBUI:
-        return redirect("/review")
+        html_str = build_index_html()
+        return Response(html_str, mimetype="text/html; charset=utf-8")
     return Response("InkTime server running. WebUI disabled.", mimetype="text/plain; charset=utf-8")
 
 
@@ -1914,9 +2164,11 @@ def review():
         page = 1
 
     md = (request.args.get('md', '') or '').strip()
+    month = (request.args.get('month', '') or '').strip()
+    day = (request.args.get('day', '') or '').strip()
     sort = (request.args.get('sort', '') or 'memory').strip() or 'memory'
 
-    rows, total_count = load_rows(page=page, page_size=REVIEW_PAGE_SIZE, md=md, sort=sort)
+    rows, total_count = load_rows(page=page, page_size=REVIEW_PAGE_SIZE, md=md, sort=sort, month=month, day=day)
     if not rows:
         return Response(
             "数据库里没有可展示的数据。请先运行你的分析脚本生成评分与文案。",
@@ -2020,44 +2272,105 @@ def sim_render():
         abort(500)
 
 
-def _ensure_cycle_photos():
-    """确保 _CYCLE_PHOTOS 填充为今日的候选图片（基于 rdp.choose_photos_for_today）。"""
+def _ensure_cycle_photos(orientation=None):
+    """确保 _CYCLE_PHOTOS 填充为今日的候选图片（基于 rdp.choose_photos_for_today）。
+    orientation: 'landscape', 'portrait', 或 None (默认，使用所有方向)"""
     import time
-    global _CYCLE_PHOTOS, _CYCLE_IDX, _CYCLE_BUILT_AT
+    global _CYCLE_STATES, _CYCLE_PHOTOS, _CYCLE_IDX
+
     now = time.time()
-    with _CYCLE_LOCK:
-        if _CYCLE_PHOTOS and (now - _CYCLE_BUILT_AT) < _CYCLE_TTL_SEC:
-            return
-        try:
-            items = rdp.load_sim_rows()
-            # 优先使用按方向选片（5 横 + 5 竖），若不可用则回退到旧的按数量选片
+    # 注意：此函数假定在调用时已经获得了 _CYCLE_LOCK 锁
+    # 如果直接调用此函数，请确保在锁保护下执行
+
+    # 如果指定了方向，使用不同的缓存键
+    cache_key = orientation if orientation else 'all'
+    state = _CYCLE_STATES.get(cache_key, {})
+    cached_photos = state.get('photos', [])
+    cached_idx = state.get('idx', 0)  # 获取缓存的索引
+    built_at = state.get('built_at', 0)
+
+    if cached_photos and (now - built_at) < _CYCLE_TTL_SEC:
+        # 更新全局变量供调用者使用
+        _CYCLE_PHOTOS = cached_photos
+        _CYCLE_IDX = cached_idx  # 使用缓存的索引
+        return
+
+    try:
+        items = rdp.load_sim_rows()
+        if orientation == 'landscape':
+            # 只选择适合横屏的照片
+            landscape_photos, info = rdp.choose_photos_by_orientation(items, rdp.TODAY, landscape_count=5, portrait_count=0)
+            photos = landscape_photos  # 取横屏照片
+        elif orientation == 'portrait':
+            # 只选择适合竖屏的照片
+            portrait_photos, info = rdp.choose_photos_by_orientation(items, rdp.TODAY, landscape_count=0, portrait_count=5)
+            photos = portrait_photos  # 取竖屏照片
+        else:
+            # 默认：优先使用按方向选片（5 横 + 5 竖），若不可用则回退到旧的按数量选片
             try:
-              photos, info = rdp.choose_photos_by_orientation(items, rdp.TODAY, landscape_count=5, portrait_count=5)
+                photos, info = rdp.choose_photos_by_orientation(items, rdp.TODAY, landscape_count=5, portrait_count=5)
             except Exception:
-              photos, info = rdp.choose_photos_for_today(items, rdp.TODAY, count=DAILY_PHOTO_QUANTITY)
-            # photos 是一组 item dict，直接保存
-            _CYCLE_PHOTOS = photos
-            _CYCLE_IDX = 0
-            _CYCLE_BUILT_AT = now
-            print(f"[server] cycle_photos built: {len(_CYCLE_PHOTOS)} items")
-        except Exception:
-            _CYCLE_PHOTOS = []
-            _CYCLE_IDX = 0
-            _CYCLE_BUILT_AT = now
+                photos, info = rdp.choose_photos_for_today(items, rdp.TODAY, count=DAILY_PHOTO_QUANTITY)
+
+        # photos 是一组 item dict，直接保存
+        _CYCLE_PHOTOS = photos
+        _CYCLE_IDX = 0  # 对于新加载的照片集，从索引0开始
+
+        # 更新全局状态
+        _CYCLE_STATES[cache_key] = {
+            'photos': photos,
+            'idx': _CYCLE_IDX,  # 保存当前索引
+            'built_at': now
+        }
+
+        print(f"[server] cycle_photos built: {len(_CYCLE_PHOTOS)} items (orientation: {orientation or 'all'})")
+    except Exception:
+        _CYCLE_PHOTOS = []
+        _CYCLE_IDX = 0
+        _CYCLE_STATES[cache_key] = {
+            'photos': [],
+            'idx': 0,
+            'built_at': now
+        }
 
 
-@app.get('/today_image')
+@app.get('/today-image')
 def today_image():
     """返回今日候选图之一；每次访问按循环顺序切换，方便浏览器刷新切换图片。"""
     _require_webui_enabled()
-    _ensure_cycle_photos()
-    global _CYCLE_IDX
+
+    # 检测屏幕方向
+    user_agent = request.headers.get('User-Agent', '').lower()
+    # 检查请求参数中是否包含方向信息
+    orientation_param = request.args.get('orientation', '').lower()
+
+    # 如果请求参数中指定了方向，则使用该方向
+    if orientation_param in ['landscape', 'portrait']:
+        orientation = orientation_param
+    # 否则尝试从User-Agent或其他头部信息推断（简单实现）
+    elif 'orientation=landscape' in user_agent or 'landscape' in user_agent:
+        orientation = 'landscape'
+    elif 'orientation=portrait' in user_agent or 'portrait' in user_agent:
+        orientation = 'portrait'
+    else:
+        # 无法确定方向，使用所有方向的照片
+        orientation = None
+
+    global _CYCLE_PHOTOS, _CYCLE_IDX, _CYCLE_STATES
     with _CYCLE_LOCK:
+        # 在锁内调用 _ensure_cycle_photos，确保一致性
+        _ensure_cycle_photos(orientation=orientation)
         if not _CYCLE_PHOTOS:
             abort(404)
         idx = _CYCLE_IDX
-        _CYCLE_IDX = (_CYCLE_IDX + 1) % len(_CYCLE_PHOTOS)
+        next_idx = (_CYCLE_IDX + 1) % len(_CYCLE_PHOTOS)
         photo = _CYCLE_PHOTOS[idx]
+
+        # 更新状态中的索引
+        cache_key = orientation if orientation else 'all'
+        if cache_key in _CYCLE_STATES:
+            _CYCLE_STATES[cache_key]['idx'] = next_idx
+        _CYCLE_IDX = next_idx  # 更新全局变量以供当前请求使用
 
     # photo 格式与 rdp.render_image 接受的 item 一致
     try:
@@ -2065,9 +2378,19 @@ def today_image():
         bio = BytesIO()
         img.save(bio, format='PNG')
         bio.seek(0)
-        return send_file(bio, mimetype='image/png', as_attachment=False)
+
+        # 创建响应并添加缓存控制头，防止浏览器缓存
+        response = send_file(bio, mimetype='image/png', as_attachment=False)
+        response.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'
+        response.headers['Pragma'] = 'no-cache'
+        response.headers['Expires'] = '0'
+        return response
     except Exception:
         abort(500)
+
+
+# 移除前端页面实现，保持后台检测逻辑
+
 
 # ESP32 专用下载接口已移除 — 现在直接通过网页访问渲染结果
 

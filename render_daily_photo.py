@@ -479,7 +479,6 @@ def format_location(lat, lon, city: str) -> str:
 
 def render_image(item: Dict[str, Any]) -> Image.Image:
     """
-    根据选中的 item 渲染一张 480x800 的 RGB 图像（竖屏）：
     - 上方图片：占 [0, CANVAS_HEIGHT - TEXT_AREA_HEIGHT)
     - 底部 TEXT_AREA_HEIGHT 像素为文字区：第一行 side 文案（最多两行），第二行日期 + 地点
     """
@@ -623,7 +622,6 @@ def main():
         img.save(preview_path)
         print(f"[OK] 已保存预览 PNG: {preview_path}")
 
-    # 不再生成 preview.png（兼容旧流程的单一预览已取消）
 
 
 if __name__ == "__main__":
