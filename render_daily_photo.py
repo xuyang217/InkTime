@@ -276,7 +276,7 @@ def choose_photos_for_today(items: List[Dict[str, Any]], today: dt.date, count: 
 
 
 def choose_photos_by_orientation(items: List[Dict[str, Any]], today: dt.date,
-                                 landscape_count: int = 5, portrait_count: int = 5) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+                                 landscape_count: int = 3, portrait_count: int = 3) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     """
     目标：返回指定数量的横屏与竖屏照片（分别为 landscape_count / portrait_count）。
     策略：与 choose_photos_for_today 相同的按月日回溯查找 memory > MEMORY_THRESHOLD 的候选池，
@@ -591,8 +591,8 @@ def main():
     if not items:
         raise SystemExit("没有可用照片（exif_json 为空或解析失败）。")
 
-    # 选 10 张：5 横屏，5 竖屏
-    photos, info = choose_photos_by_orientation(items, TODAY, landscape_count=5, portrait_count=5)
+    # 选 6 张：3 横屏，3 竖屏
+    photos, info = choose_photos_by_orientation(items, TODAY, landscape_count=3, portrait_count=3)
 
     print("[INFO] 目标月日:", info.get("target_md"))
     print("[INFO] 实际使用月日:", info.get("used_md"))

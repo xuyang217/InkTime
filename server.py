@@ -58,6 +58,12 @@ _CYCLE_LOCK = threading.Lock()
 _CYCLE_STATES = {}  # {orientation: {'photos': [...], 'idx': int, 'built_at': float}}
 _CYCLE_TTL_SEC = 300.0
 
+# 记录上次获取照片的日期，用于判断是否需要重置
+_LAST_PHOTO_DATE = ""
+
+# 服务器启动时选好的照片
+_STARTUP_SELECTED_PHOTOS = {}
+
 def _load_all_md_list() -> list[str]:
     """从全库提取所有存在的 MM-DD（去重、排序）。用于前端“随机一天”。"""
     if not DB_PATH.exists():
@@ -2273,14 +2279,22 @@ def sim_render():
 
 
 def _ensure_cycle_photos(orientation=None):
-    """确保 _CYCLE_PHOTOS 填充为今日的候选图片（基于 rdp.choose_photos_for_today）。
+    """确保 _CYCLE_PHOTOS 填充为今日的候选图片（基于服务器启动时已选好的照片）。
     orientation: 'landscape', 'portrait', 或 None (默认，使用所有方向)"""
     import time
-    global _CYCLE_STATES, _CYCLE_PHOTOS, _CYCLE_IDX
+    from datetime import datetime
+    global _CYCLE_STATES, _CYCLE_PHOTOS, _CYCLE_IDX, _LAST_PHOTO_DATE, _STARTUP_SELECTED_PHOTOS
 
     now = time.time()
+    current_date = datetime.now().strftime("%Y-%m-%d")  # 获取当前日期
+
     # 注意：此函数假定在调用时已经获得了 _CYCLE_LOCK 锁
     # 如果直接调用此函数，请确保在锁保护下执行
+
+    # 检查日期是否变化，如果是，则清空缓存
+    if _LAST_PHOTO_DATE != current_date:
+        _CYCLE_STATES.clear()  # 清空所有缓存
+        _LAST_PHOTO_DATE = current_date  # 更新记录的日期
 
     # 如果指定了方向，使用不同的缓存键
     cache_key = orientation if orientation else 'all'
@@ -2296,21 +2310,9 @@ def _ensure_cycle_photos(orientation=None):
         return
 
     try:
-        items = rdp.load_sim_rows()
-        if orientation == 'landscape':
-            # 只选择适合横屏的照片
-            landscape_photos, info = rdp.choose_photos_by_orientation(items, rdp.TODAY, landscape_count=5, portrait_count=0)
-            photos = landscape_photos  # 取横屏照片
-        elif orientation == 'portrait':
-            # 只选择适合竖屏的照片
-            portrait_photos, info = rdp.choose_photos_by_orientation(items, rdp.TODAY, landscape_count=0, portrait_count=5)
-            photos = portrait_photos  # 取竖屏照片
-        else:
-            # 默认：优先使用按方向选片（5 横 + 5 竖），若不可用则回退到旧的按数量选片
-            try:
-                photos, info = rdp.choose_photos_by_orientation(items, rdp.TODAY, landscape_count=5, portrait_count=5)
-            except Exception:
-                photos, info = rdp.choose_photos_for_today(items, rdp.TODAY, count=DAILY_PHOTO_QUANTITY)
+        # 使用服务器启动时已经选好的照片，不再重复选片
+        startup_photos = _STARTUP_SELECTED_PHOTOS.get(cache_key, [])
+        photos = startup_photos
 
         # photos 是一组 item dict，直接保存
         _CYCLE_PHOTOS = photos
@@ -2323,7 +2325,7 @@ def _ensure_cycle_photos(orientation=None):
             'built_at': now
         }
 
-        print(f"[server] cycle_photos built: {len(_CYCLE_PHOTOS)} items (orientation: {orientation or 'all'})")
+        print(f"[server] cycle_photos loaded: {len(_CYCLE_PHOTOS)} items (orientation: {orientation or 'all'})")
     except Exception:
         _CYCLE_PHOTOS = []
         _CYCLE_IDX = 0
@@ -2454,4 +2456,36 @@ if __name__ == "__main__":
     print(f"[InkTime] key: {DOWNLOAD_KEY}")
     print(f"[InkTime] listen: {FLASK_HOST}:{FLASK_PORT}")
     print(f"[InkTime] open: http://127.0.0.1:{FLASK_PORT}/  (本机)")
+
+    # 启动时运行一次选片功能
+    try:
+        import render_daily_photo as rdp
+        items = rdp.load_sim_rows()
+        # 优先使用按方向选片（3 横 + 3 竖），若不可用则回退到旧的按数量选片
+        try:
+            photos, info = rdp.choose_photos_by_orientation(items, rdp.TODAY, landscape_count=3, portrait_count=3)
+        except Exception:
+            photos, info = rdp.choose_photos_for_today(items, rdp.TODAY, count=6)  # 总共6张
+
+        # 将选好的照片按方向分类存储
+        landscape_photos = [p for p in photos if p.get('orientation') in ['Landscape', 'landscape', 'L', 'l']]
+        portrait_photos = [p for p in photos if p.get('orientation') in ['Portrait', 'portrait', 'P', 'p']]
+
+        # 如果无法按方向分类，手动分配前5个为横屏，后5个为竖屏（如果总数是10）
+        if len(landscape_photos) == 0 and len(portrait_photos) == 0 and len(photos) >= 2:
+            landscape_photos = photos[:min(5, len(photos)//2 + len(photos)%2)]
+            portrait_photos = photos[min(5, len(photos)//2 + len(photos)%2):]
+
+        # 更新全局变量
+        globals()['_STARTUP_SELECTED_PHOTOS'] = {
+            'all': photos,
+            'landscape': landscape_photos,
+            'portrait': portrait_photos
+        }
+        print("今日照片已筛选完毕")
+    except Exception as e:
+        print(f"选片功能运行出错: {e}")
+        # 如果出错，至少初始化一个空字典
+        globals()['_STARTUP_SELECTED_PHOTOS'] = {'all': [], 'landscape': [], 'portrait': []}
+
     app.run(host=FLASK_HOST, port=FLASK_PORT, debug=False)
